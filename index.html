@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tic Tac Boo</title>
+<link href="https://fonts.googleapis.com/css2?family=Creepster&family=Fredoka:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root { color-scheme: dark; --bg: #2a0a4f; }
+html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; touch-action: none; overscroll-behavior: none; -webkit-user-select: none; user-select: none; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="probe" style="position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+const COL = { orange: '#ff7a00', orangeD: '#b84400', ink: '#12031f', tile: '#3a0f6b', neon: '#b86bff', lime: '#9dff3a', lilac: '#c9a2ff' };
+const LINES = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+const NAMES = { P: 'Pumpkin', C: 'Cat' };
+let scene = 'menu', mode = 'single', diff = 'hard', humanSym = 'P', starter = 'P';
+let board, placed, turn, over, winner, winLine, winT = 0, botAt = 0;
+let scores = { P: 0, C: 0, D: 0 };
+let buttons = [], parts = [], stars = [], L = {}, safeT = 0, safeB = 0;
+let canHover = false;
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  canHover = window.matchMedia('(hover: hover)').matches;
+  for (let i = 0; i < 45; i++) stars.push({ x: random(), y: random(), r: random(1, 2.6), p: random(TWO_PI) });
+  relayout();
+  newRound();
+}
+function windowResized() { resizeCanvas(windowWidth, windowHeight); relayout(); }
+function relayout() {
+  const cs = getComputedStyle(document.getElementById('probe'));
+  safeT = parseFloat(cs.paddingTop) || 0; safeB = parseFloat(cs.paddingBottom) || 0;
+  const W = width, top = safeT, uh = height - safeT - safeB, bottom = top + uh;
+  L.W = W; L.top = top; L.uh = uh; L.bottom = bottom;
+  L.land = W > uh * 1.2;
+  L.titleSize = min(W * 0.14, uh * (L.land ? 0.13 : 0.09), 72);
+  L.scoreY = top + uh * 0.2; L.statusY = top + uh * 0.285;
+  L.bs = min(W * 0.9, uh * 0.5, 480);
+  L.bx = (W - L.bs) / 2; L.by = top + uh * 0.33;
+  makeButtons();
+}
+function makeButtons() {
+  buttons = [];
+  const W = L.W;
+  if (scene === 'menu') {
+    const startY = L.top + L.uh * 0.46, step = min(70, (L.top + L.uh * 0.97 - startY) / 4);
+    const bw = min(320, W * 0.82), bh = step - 12;
+    const add = (i, label, fn, col) => buttons.push({ x: W / 2, y: startY + step * (i + 0.5), w: bw, h: bh, label, fn, col });
+    add(0, 'Play vs Bot', () => startGame('single'), COL.orange);
+    add(1, 'Two Players', () => startGame('multi'), COL.lime);
+    add(2, () => 'Bot level: ' + (diff === 'hard' ? 'Hard' : 'Easy'), () => { diff = diff === 'hard' ? 'easy' : 'hard'; }, COL.lilac);
+    add(3, () => 'You play as: ' + NAMES[humanSym], () => { humanSym = humanSym === 'P' ? 'C' : 'P'; }, COL.lilac);
+  } else {
+    const rem = L.bottom - (L.by + L.bs), bh = min(46, rem * 0.6), bw = min(150, W * 0.42), y = L.by + L.bs + rem / 2;
+    buttons.push({ x: W / 2 - bw / 2 - 8, y, w: bw, h: bh, label: 'Menu', fn: () => { scene = 'menu'; makeButtons(); }, col: COL.lilac });
+    buttons.push({ x: W / 2 + bw / 2 + 8, y, w: bw, h: bh, label: 'New round', fn: nextRound, col: COL.orange });
+  }
+}
+
+/* ---------- game logic ---------- */
+function startGame(m) { mode = m; scores = { P: 0, C: 0, D: 0 }; starter = 'P'; scene = 'game'; makeButtons(); newRound(); }
+function newRound() {
+  board = Array(9).fill(null); placed = Array(9).fill(0);
+  over = false; winner = null; winLine = null; turn = starter; scheduleBot();
+}
+function nextRound() { starter = starter === 'P' ? 'C' : 'P'; newRound(); }
+function isBotTurn() { return scene === 'game' && mode === 'single' && !over && turn !== humanSym; }
+function scheduleBot() { if (isBotTurn()) botAt = millis() + 700; }
+function checkWin(b) {
+  for (const l of LINES) if (b[l[0]] && b[l[0]] === b[l[1]] && b[l[0]] === b[l[2]]) return { line: l, sym: b[l[0]] };
+  return null;
+}
+function play(i) {
+  board[i] = turn; placed[i] = millis();
+  const w = checkWin(board);
+  if (w) { over = true; winner = w.sym; winLine = w.line; scores[winner]++; winT = millis(); burst(); }
+  else if (board.every(Boolean)) { over = true; scores.D++; winT = millis(); }
+  else { turn = turn === 'P' ? 'C' : 'P'; scheduleBot(); }
+}
+function minimax(b, sym, bot, d) {
+  const w = checkWin(b);
+  if (w) return w.sym === bot ? 10 - d : d - 10;
+  if (b.every(Boolean)) return 0;
+  const opp = sym === 'P' ? 'C' : 'P';
+  let best = sym === bot ? -99 : 99;
+  for (let i = 0; i < 9; i++) {
+    if (b[i]) continue;
+    b[i] = sym; const v = minimax(b, opp, bot, d + 1); b[i] = null;
+    best = sym === bot ? max(best, v) : min(best, v);
+  }
+  return best;
+}
+function botMove() {
+  const bot = humanSym === 'P' ? 'C' : 'P', opp = humanSym;
+  const empty = []; board.forEach((v, i) => { if (!v) empty.push(i); });
+  if (diff === 'easy' && random() < 0.6) return play(random(empty));
+  let bv = -99, ms = [];
+  for (const i of empty) {
+    board[i] = bot; const v = minimax(board, opp, bot, 1); board[i] = null;
+    if (v > bv) { bv = v; ms = [i]; } else if (v === bv) ms.push(i);
+  }
+  play(random(ms));
+}
+
+/* ---------- input ---------- */
+const hit = (b, x, y) => abs(x - b.x) < b.w / 2 && abs(y - b.y) < b.h / 2;
+function cellAt(x, y) {
+  if (x < L.bx || y < L.by || x > L.bx + L.bs || y > L.by + L.bs) return -1;
+  return floor((y - L.by) / (L.bs / 3)) * 3 + floor((x - L.bx) / (L.bs / 3));
+}
+function mousePressed() {
+  for (const b of buttons) if (hit(b, mouseX, mouseY)) { b.fn(); return false; }
+  if (scene === 'game') {
+    const i = cellAt(mouseX, mouseY);
+    if (i < 0) return false;
+    if (over) { nextRound(); return false; }
+    if (!board[i] && !isBotTurn()) play(i);
+  }
+  return false;
+}
+
+/* ---------- drawing: characters ---------- */
+function drawPumpkin(x, y, s, rot = 0) {
+  push(); translate(x, y); rotate(rot); scale(s); translate(0, 0.17);
+  strokeWeight(0.05); stroke(COL.orangeD); fill(COL.orange);
+  for (const px of [-0.62, 0.62, -0.31, 0.31, 0]) ellipse(px, 0.05, 0.95, 1.5);
+  fill('#2e8b3a'); stroke('#14501c');
+  beginShape(); vertex(-0.14, -0.66); bezierVertex(-0.16, -0.95, -0.1, -1.05, 0.05, -1.15);
+  vertex(0.22, -1.05); bezierVertex(0.1, -0.98, 0.08, -0.9, 0.12, -0.66); endShape(CLOSE);
+  noStroke(); fill(COL.ink);
+  triangle(-0.62, -0.02, -0.2, -0.02, -0.42, -0.42); triangle(0.62, -0.02, 0.2, -0.02, 0.42, -0.42);
+  triangle(-0.1, 0.08, 0.1, 0.08, 0, 0.26);
+  beginShape();
+  for (let i = 0; i <= 8; i++) vertex(-0.7 + i * 0.175, 0.3 + (i % 2) * 0.13);
+  for (let i = 8; i >= 0; i--) { const x2 = -0.7 + i * 0.175; vertex(x2, 0.5 + 0.22 * (1 - sq(x2 / 0.7))); }
+  endShape(CLOSE);
+  pop();
+}
+function drawCat(x, y, s, rot = 0) {
+  push(); translate(x, y); rotate(rot); scale(s); translate(-0.15, 0);
+  noFill(); strokeCap(ROUND);
+  const tail = () => bezier(0.3, 0.85, 0.95, 0.95, 1.0, 0.45, 1.2, 0.55);
+  stroke(COL.lilac); strokeWeight(0.25); tail(); stroke('#0c0214'); strokeWeight(0.18); tail();
+  const shapes = () => {
+    ellipse(0, 0.42, 1.0, 1.1); ellipse(0, -0.3, 0.95, 0.8);
+    triangle(-0.45, -0.42, -0.42, -0.95, -0.08, -0.62); triangle(0.45, -0.42, 0.42, -0.95, 0.08, -0.62);
+  };
+  stroke(COL.lilac); strokeWeight(0.08); fill(COL.lilac); shapes();
+  noStroke(); fill('#0c0214'); shapes();
+  fill(255); ellipse(-0.2, -0.3, 0.27, 0.31); ellipse(0.2, -0.3, 0.27, 0.31);
+  fill('#0c0214'); ellipse(-0.2, -0.28, 0.12, 0.17); ellipse(0.2, -0.28, 0.12, 0.17);
+  fill('#ff8fc0'); triangle(-0.06, -0.12, 0.06, -0.12, 0, -0.04);
+  pop();
+}
+const drawSym = (sym, x, y, s, rot) => (sym === 'P' ? drawPumpkin : drawCat)(x, y, s, rot);
+function easeOutBack(t) { t = constrain(t, 0, 1); const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * pow(t - 1, 3) + c1 * pow(t - 1, 2); }
+
+/* ---------- drawing: decor ---------- */
+function drawWeb(cx, cy, r, a0, a1) {
+  stroke(255, 255, 255, 80); strokeWeight(1.2); noFill();
+  const n = 6;
+  for (let i = 0; i <= n; i++) { const a = lerp(a0, a1, i / n); line(cx, cy, cx + cos(a) * r, cy + sin(a) * r); }
+  for (let k = 1; k <= 5; k++) {
+    const rr = r * k / 5; beginShape();
+    for (let i = 0; i <= n; i++) {
+      const a = lerp(a0, a1, i / n);
+      if (i === 0) vertex(cx + cos(a) * rr, cy + sin(a) * rr);
+      else { const m = lerp(a0, a1, (i - 0.5) / n); quadraticVertex(cx + cos(m) * rr * 0.86, cy + sin(m) * rr * 0.86, cx + cos(a) * rr, cy + sin(a) * rr); }
+    }
+    endShape();
+  }
+}
+function drawSpider(x, y, s, t) {
+  push(); translate(x, y); scale(s);
+  stroke(COL.ink); strokeWeight(0.1); strokeCap(ROUND); noFill();
+  for (let side = -1; side <= 1; side += 2) for (let i = 0; i < 4; i++) {
+    const w = sin(t * 3 + i * 1.3 + (side > 0 ? 1.5 : 0)) * 0.12, yy = (i - 1.5) * 0.22;
+    beginShape(); vertex(side * 0.3, yy); vertex(side * (0.95 + 0.1 * (i % 2)), yy * 2 - 0.5 + w); vertex(side * 1.4, yy * 2.4 + 0.4 + w); endShape();
+  }
+  noStroke(); fill(COL.ink); ellipse(0, 0.25, 0.9, 1.0); ellipse(0, -0.4, 0.6, 0.55);
+  fill(COL.orange); ellipse(0, 0.25, 0.26, 0.4);
+  fill(255); ellipse(-0.12, -0.45, 0.16, 0.16); ellipse(0.12, -0.45, 0.16, 0.16);
+  pop();
+}
+function drawDecor() {
+  const g = drawingContext.createLinearGradient(0, 0, 0, height);
+  g.addColorStop(0, '#6a1fb0'); g.addColorStop(0.55, '#45107a'); g.addColorStop(1, '#220845');
+  drawingContext.fillStyle = g; noStroke(); rect(0, 0, width, height);
+  const t = millis() / 1000;
+  noStroke();
+  for (const s of stars) { fill(255, 255, 255, 90 + 90 * sin(t * 2 + s.p)); circle(s.x * width, s.y * height, s.r); }
+  const r = min(width, height) * 0.36;
+  drawWeb(0, 0, r, 0, HALF_PI); drawWeb(width, 0, r, HALF_PI, PI);
+  drawWeb(0, height, r * 0.6, -HALF_PI, 0); drawWeb(width, height, r * 0.6, PI, PI + HALF_PI);
+  const sp = [{ x: 0.1, len: 0.16, s: 20, p: 0 }, { x: 0.9, len: 0.27, s: 24, p: 2 }, { x: 0.3, len: 0.06, s: 13, p: 4 }];
+  for (const d of sp) {
+    const x = d.x * width + sin(t + d.p) * 4, y = d.len * height + sin(t * 1.3 + d.p) * 10;
+    stroke(255, 255, 255, 130); strokeWeight(1); line(x, 0, x, y); drawSpider(x, y, d.s, t);
+  }
+  const cx = ((t * 55) % (width + 120)) - 60;
+  drawSpider(cx, height - safeB - 20, 14, t * 2);
+}
+
+/* ---------- drawing: scenes ---------- */
+function wavyTitle(str, cx, cy, size) {
+  textFont('Creepster'); textSize(size); textAlign(LEFT, CENTER); noStroke();
+  let total = 0; for (const ch of str) total += textWidth(ch) + size * 0.04;
+  let x = cx - total / 2, word = 0;
+  const cols = [COL.orange, '#ffffff', COL.lime];
+  [...str].forEach((ch, i) => {
+    const yy = cy + sin(frameCount * 0.07 + i * 0.6) * size * 0.07;
+    if (ch === ' ') { word++; x += textWidth(ch) + size * 0.04; return; }
+    fill(COL.ink); text(ch, x + size * 0.05, yy + size * 0.06);
+    fill(cols[word]); text(ch, x, yy);
+    x += textWidth(ch) + size * 0.04;
+  });
+}
+function drawMenu() {
+  wavyTitle('TIC TAC BOO', L.W / 2, L.top + L.uh * 0.12, L.titleSize * 1.15);
+  const s = min(L.W * 0.17, L.uh * 0.1), y = L.top + L.uh * 0.31, t = millis() / 1000;
+  drawPumpkin(L.W / 2 - s * 2.4, y + sin(t * 2) * 5, s, sin(t * 1.5) * 0.1);
+  drawCat(L.W / 2 + s * 2.4, y + sin(t * 2 + 1.5) * 5, s, -sin(t * 1.5) * 0.1);
+  textFont('Creepster'); textAlign(CENTER, CENTER); textSize(s * 0.8); fill(COL.lime); text('vs', L.W / 2, y);
+}
+function statusText() {
+  if (over) {
+    if (!winner) return 'A spooky stalemate!';
+    if (mode === 'single') return winner === humanSym ? 'You win! Boo-yah!' : 'The bot got you! Muahaha!';
+    return NAMES[winner] + ' wins! Boo-yah!';
+  }
+  if (mode === 'single') return turn === humanSym ? 'Your turn, ' + NAMES[turn] : NAMES[turn] + ' bot is plotting…';
+  return NAMES[turn] + '’s turn';
+}
+function drawGame() {
+  wavyTitle('TIC TAC BOO', L.W / 2, L.top + L.uh * 0.075, L.titleSize);
+  const gap = min(L.W * 0.3, 120), t = millis() / 1000;
+  textFont('Fredoka'); textStyle(BOLD); textAlign(CENTER, CENTER);
+  [['P', -1], ['D', 0], ['C', 1]].forEach(([k, d]) => {
+    const x = L.W / 2 + d * gap, y = L.scoreY;
+    if (k !== 'D') {
+      const on = !over && turn === k;
+      noFill(); stroke(on ? COL.lime : color(255, 255, 255, 50)); strokeWeight(on ? 3 : 1.5);
+      if (on) { drawingContext.shadowBlur = 14; drawingContext.shadowColor = COL.lime; }
+      rect(x - gap * 0.45, y - 27, gap * 0.9, 54, 27);
+      drawingContext.shadowBlur = 0; noStroke();
+      drawSym(k, x - gap * 0.2, y, 13, on ? sin(t * 6) * 0.12 : 0);
+    }
+    noStroke(); fill(255); textSize(26); text(scores[k], k === 'D' ? x : x + gap * 0.17, y - (k === 'D' ? 6 : 1));
+    if (k === 'D') { textSize(12); fill(255, 255, 255, 160); text('ties', x, y + 14); }
+  });
+  textSize(min(24, L.W * 0.06)); fill(COL.ink); text(statusText(), L.W / 2 + 1.5, L.statusY + 2);
+  fill(over ? COL.lime : 255); text(statusText(), L.W / 2, L.statusY);
+
+  const cs = L.bs / 3, gp = cs * 0.05;
+  const hov = (canHover && !over && !isBotTurn()) ? cellAt(mouseX, mouseY) : -1;
+  for (let i = 0; i < 9; i++) {
+    const cx = L.bx + (i % 3 + 0.5) * cs, cy = L.by + (floor(i / 3) + 0.5) * cs;
+    const win = winLine && winLine.includes(i);
+    drawingContext.shadowBlur = win ? 22 : 10; drawingContext.shadowColor = win ? COL.lime : COL.neon;
+    fill(win ? '#5a1d9a' : (i === hov && !board[i] ? '#521a8c' : COL.tile));
+    stroke(win ? COL.lime : COL.neon); strokeWeight(2.5);
+    rect(cx - cs / 2 + gp, cy - cs / 2 + gp, cs - gp * 2, cs - gp * 2, cs * 0.18);
+    drawingContext.shadowBlur = 0;
+    if (board[i]) {
+      let k = easeOutBack((millis() - placed[i]) / 380);
+      if (win) k *= 1 + 0.1 * sin(millis() * 0.012);
+      drawSym(board[i], cx, cy, cs * 0.34 * k, sin(t * 2 + i) * 0.05);
+    } else if (i === hov) {
+      drawingContext.globalAlpha = 0.3; drawSym(turn, cx, cy, cs * 0.34, 0); drawingContext.globalAlpha = 1;
+    }
+  }
+  if (winLine) {
+    const p = constrain((millis() - winT) / 400, 0, 1);
+    const pt = i => [L.bx + (i % 3 + 0.5) * cs, L.by + (floor(i / 3) + 0.5) * cs];
+    const [ax, ay] = pt(winLine[0]), [bx, by] = pt(winLine[2]);
+    stroke(COL.lime); strokeWeight(L.bs * 0.03); strokeCap(ROUND);
+    drawingContext.shadowBlur = 20; drawingContext.shadowColor = COL.lime;
+    line(ax, ay, lerp(ax, bx, p), lerp(ay, by, p)); drawingContext.shadowBlur = 0;
+  }
+  if (over && millis() - winT > 800) {
+    textSize(13); noStroke(); fill(255, 255, 255, 150 + 80 * sin(t * 4));
+    text('Tap the board for the next round', L.W / 2, L.by + L.bs + 12);
+  }
+  textStyle(NORMAL);
+}
+function drawButtons() {
+  textFont('Fredoka'); textStyle(BOLD); textAlign(CENTER, CENTER);
+  for (const b of buttons) {
+    const h = canHover && hit(b, mouseX, mouseY), up = h ? -2 : 0;
+    noStroke(); fill(COL.ink); rect(b.x - b.w / 2, b.y - b.h / 2 + 5, b.w, b.h, b.h / 2);
+    fill(b.col); stroke(COL.ink); strokeWeight(3); rect(b.x - b.w / 2, b.y - b.h / 2 + up, b.w, b.h, b.h / 2);
+    noStroke(); fill(COL.ink); textSize(b.h * 0.42);
+    text(typeof b.label === 'function' ? b.label() : b.label, b.x, b.y + up + 1);
+  }
+  textStyle(NORMAL);
+}
+
+/* ---------- particles ---------- */
+function burst() {
+  const cs = L.bs / 3, c = i => [L.bx + (i % 3 + 0.5) * cs, L.by + (floor(i / 3) + 0.5) * cs];
+  const [x, y] = c(winLine[1]), cols = [COL.orange, COL.lime, '#ffffff', COL.neon];
+  for (let i = 0; i < 70; i++) {
+    const a = random(TWO_PI), v = random(2, 8);
+    parts.push({ x, y, vx: cos(a) * v, vy: sin(a) * v - 3, life: random(50, 90), c: random(cols), r: random(3, 7) });
+  }
+}
+function drawParts() {
+  noStroke();
+  for (const p of parts) { p.x += p.vx; p.y += p.vy; p.vy += 0.18; p.life--; fill(p.c); circle(p.x, p.y, p.r * constrain(p.life / 30, 0, 1)); }
+  parts = parts.filter(p => p.life > 0);
+}
+
+function draw() {
+  if (isBotTurn() && millis() > botAt) botMove();
+  drawDecor();
+  if (scene === 'menu') drawMenu(); else drawGame();
+  drawButtons();
+  drawParts();
+  if (canHover) {
+    const onBtn = buttons.some(b => hit(b, mouseX, mouseY));
+    const onCell = scene === 'game' && (over ? cellAt(mouseX, mouseY) >= 0 : (!isBotTurn() && cellAt(mouseX, mouseY) >= 0 && !board[cellAt(mouseX, mouseY)]));
+    cursor(onBtn || onCell ? HAND : ARROW);
+  }
+}
+</script>
+</body>
+</html>
